@@ -85,7 +85,7 @@ from telegram.ext import (
     filters,
 )
 
-VERSION = "v3.1-python314-fix-2026-11-04"
+VERSION = "v3.2-cookie-fix-2026-11-04"
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -286,8 +286,23 @@ def resolve_terabox(link: str) -> dict:
             if h and h not in hosts:
                 hosts.append(h)
 
+        # v3.2 fix (2026-11-04, dlink empty with cookie_len=120):
+        # The share page sets a GUEST ndus in the session jar. If we
+        # then call share/list on the same Session, requests can send
+        # that guest cookie alongside / instead of the logged-in
+        # TERABOX_COOKIE header, so Terabox treats us as a guest and
+        # returns dlink=None even though a real cookie is set.
+        # Clear the jar before the API calls, so ONLY the explicit
+        # TERABOX_COOKIE header is sent. Also track the API errno so
+        # the error message can tell guest (-6 / 400210 / 460020)
+        # apart from a real logged-in session.
+        try:
+            sess.cookies.clear()
+        except Exception:
+            pass
         data = {}
         last_api_err = ""
+        last_api_errno = None
         for api_host in hosts:
             attempts = [
                 ("api/shorturlinfo", {
@@ -311,6 +326,8 @@ def resolve_terabox(link: str) -> dict:
                     last_api_err = str(e)
                     data = {}
                     continue
+                if isinstance(data, dict) and "errno" in data:
+                    last_api_errno = data.get("errno")
                 if data and data.get("list") and not data.get("errno"):
                     break
                 last_api_err = str(data.get("errmsg") or data.get("errno") or data)
@@ -376,10 +393,14 @@ def resolve_terabox(link: str) -> dict:
         if not all_infos:
             raise RuntimeError(
                 "Terabox gave the file name but no download link (dlink empty). "
-                "That means Terabox did not accept this session as logged in, "
-                "or this share contains only folders with no file inside. "
-                "If you have a TERABOX_COOKIE set, re-copy ndus + ndut_fmt fresh "
-                "from terabox.app while logged in. If not, this link may need a login."
+                f"API errno={last_api_errno}, host={hosts[0] if hosts else '?'}, "
+                f"cookies={_cookie_names()}, cookie_len={len(TERABOX_COOKIE)}. "
+                "Terabox treated this as a guest session, so the cookie was "
+                "not accepted as logged in. That usually means the cookie "
+                "expired, or it was copied while logged out (Terabox also "
+                "gives a guest ndus, which looks the same but gives no dlink). "
+                "Re-copy ndus + ndut_fmt fresh from terabox.app while you can "
+                "see your username/files logged in, then update TERABOX_COOKIE."
             )
         info = all_infos[0]
         all_files = [_meta_from_info(x) for x in all_infos]
