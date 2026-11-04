@@ -453,9 +453,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "see README.md for how to grab yours."
                 )
                 return
-            meta = await context.application.run_in_executor(None, resolve_terabox, url)
+            meta = await asyncio.to_thread(resolve_terabox, url)
         else:
-            meta = await context.application.run_in_executor(None, resolve_diskwala, url)
+            meta = await asyncio.to_thread(resolve_diskwala, url)
     except Exception as e:  # noqa: BLE001 - show resolver errors to the user
         log.exception("resolve failed")
         await status.edit_text(f"❌ Couldn't resolve that link:\n{e}")
@@ -565,8 +565,8 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     try:
-        await context.application.run_in_executor(
-            None, download_file, meta["url"], dest, progress, item.get("service")
+        await asyncio.to_thread(
+            download_file, meta["url"], dest, progress, item.get("service")
         )
     except Exception as e:  # noqa: BLE001
         log.exception("download failed")
