@@ -67,7 +67,8 @@ log = logging.getLogger("linkbot")
 
 TERABOX_DOMAINS = (
     "terabox.com", "teraboxapp.com", "1024terabox.com", "terabox.app",
-    "mirrobox.com", "nephobox.com", "freemibox.com", "dubox.com",
+    "teraboxshare.com", "mirrobox.com", "nephobox.com", "freemibox.com",
+    "dubox.com",
 )
 DISKWALA_DOMAINS = ("diskwala", "diskswala")
 
@@ -86,6 +87,13 @@ def detect_service(url: str) -> str | None:
     if any(d in host for d in TERABOX_DOMAINS):
         return "terabox"
     if any(d in host for d in DISKWALA_DOMAINS):
+        return "diskwala"
+    # Future-proof: Terabox keeps adding share domains (e.g. the
+    # teraboxshare.com link that was rejected on 2026-11-04). Any host
+    # with "terabox" in it is a Terabox link.
+    if "terabox" in host:
+        return "terabox"
+    if "diskwala" in host:
         return "diskwala"
     return None
 
