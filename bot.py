@@ -85,7 +85,7 @@ from telegram.ext import (
     filters,
 )
 
-VERSION = "v3.0-terabest-like-2026-11-04"
+VERSION = "v3.1-python314-fix-2026-11-04"
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -755,6 +755,17 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set. Run start_bot.bat - it will make .env for you.")
+    # Python 3.14 fix (2026-11-04 Render crash):
+    # PTB 21.6 calls asyncio.get_event_loop() in run_polling(), and
+    # Python 3.14 has no current event loop in MainThread, so it raised
+    # "RuntimeError: There is no current event loop in thread 'MainThread'".
+    # PTB 22.4+ fixed that logic, and we now use PTB 22.8, but also
+    # create a loop here as a safety net so run_polling() never crashes
+    # for this reason again, on any Python version.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     _start_web_server()
     # PTB default write timeout is only 5s - far too short for a
     # 20-50 MB upload. Raise all timeouts, and handle updates
