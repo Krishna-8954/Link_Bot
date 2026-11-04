@@ -1,0 +1,31 @@
+# Render deploy config (free tier works for testing).
+# NOTE: Render's free tier sleeps after ~15 min of inactivity and has an
+# ephemeral disk, so this is fine for trying the bot out but not for real use.
+# For a bot that's always awake, use Oracle Cloud free tier + linkbot.service.
+services:
+  - type: web
+    name: telegram-link-bot
+    runtime: python
+    # Try installing Chromium's OS dependencies too (needs root at build time);
+    # fall back to the browser alone if the platform forbids apt.
+    buildCommand: pip install -r requirements.txt && (python -m playwright install --with-deps chromium || python -m playwright install chromium)
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: TERABOX_COOKIE
+        sync: false
+      # Your Render URL, e.g. https://telegram-link-bot-xxxx.onrender.com
+      # Set this AFTER the first deploy (Render shows the URL then).
+      # It powers the "Play in app browser" button.
+      - key: PUBLIC_URL
+        sync: false
+      # Standard Bot API caps bot uploads at 50 MB — fail fast with a clear
+      # message instead of downloading a big file and failing at upload.
+      # (Raise to 2 only if you run a local Bot API server; see README §6.)
+      - key: MAX_FILE_GB
+        value: "0.048"
+      # Keep the Chromium binary inside the project so it survives into the
+      # deploy artifact (Render's default ~/.cache path may not persist).
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: ".cache/ms-playwright"

@@ -1,0 +1,22 @@
+# systemd unit for a VPS (e.g. Oracle Cloud Always Free).
+# Install: copy the project to /opt/linkbot, create a venv, then:
+#   sudo cp linkbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now linkbot
+# Logs: journalctl -u linkbot -f
+
+[Unit]
+Description=Telegram Link Bot (Terabox + Diskwala)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/linkbot
+EnvironmentFile=/opt/linkbot/.env
+ExecStart=/opt/linkbot/venv/bin/python /opt/linkbot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
