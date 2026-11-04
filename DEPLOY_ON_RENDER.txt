@@ -1,0 +1,51 @@
+DEPLOY v3 ON RENDER - SO OTHERS CAN USE IT
+============================================
+This is for a PUBLIC bot, like @TeraBestBot.
+Your PC can stay OFF. Anyone on Telegram who finds your bot can send
+a Terabox link and get Online Player + Direct Link.
+
+Why Render?
+- Free, no PC needed, runs 24x7 (sleeps after 15 min idle on free tier,
+  first message after a gap takes 30-60 sec to wake up - normal).
+- Render gives you a public URL. That URL is PUBLIC_URL.
+  It powers the Online Player button.
+
+What you need:
+- GitHub account (free) - you already have repo telegram-link-bot
+- Render account (free, sign in with GitHub)
+- BOT_TOKEN from @BotFather (you already have it)
+- TERABOX_COOKIE is OPTIONAL in v3 - leave it blank first, try guest mode.
+
+STEPS - ONE AT A TIME, TELL MUSE AFTER EACH ONE:
+  Step 1 - Upload these v3 files to GitHub (replace the old files in
+           your telegram-link-bot repo, then Commit)
+           Files: bot.py, requirements.txt, render.yaml, .env.example
+           Do NOT upload .env (it has secrets, and Render uses its own
+           Environment settings instead)
+  Step 2 - In Render, open your telegram-link-bot service.
+           If it says Suspended, click Resume. Wait for Live.
+           If you have no service yet, make a new Web Service from
+           your GitHub repo - Render will read render.yaml.
+  Step 3 - In Render > Environment, check:
+           BOT_TOKEN = your token (already there from before)
+           PUBLIC_URL = BLANK for now
+           TERABOX_COOKIE = BLANK for now (guest mode first)
+           ALLOWED_USER_IDS = BLANK (blank = allow everyone)
+           Save, wait for Live again.
+  Step 4 - Copy your Render URL from the top of the service page,
+           e.g. https://telegram-link-bot-xxxx.onrender.com
+           Put that URL in Render > Environment as PUBLIC_URL, Save,
+           wait for Live.
+  Step 5 - In Telegram, send /start to your bot, then send a Terabox link.
+           Tap Online Player. Tell Muse what happens.
+
+IMPORTANT - HONEST NOTE:
+  Terabox blocked Render's servers before ("need verify").
+  v3 tries guest mode first, which may work better, but if Terabox
+  still blocks Render, the bot will say so clearly in its error.
+  If that happens, we will try another host. Do not re-copy the
+  cookie in a loop - that was the old mistake.
+
+  Also: do NOT run the PC bot at the same time with the same token.
+  Two bots with one token fight each other (Conflict error).
+  For a public bot, use Render ONLY. Keep your PC bot OFF.

@@ -1,5 +1,3 @@
-python-telegram-bot>=21.0
+python-telegram-bot==21.6
 requests>=2.31
-terabox-downloader>=1.8      # get_file_info(link) signature verified against 1.8
 python-dotenv>=1.0
-playwright>=1.40          # needed for the Diskwala resolver (headless browser)
