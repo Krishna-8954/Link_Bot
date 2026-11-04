@@ -167,6 +167,12 @@ def _resolve_terabox_custom(link: str) -> dict:
     """
     if not TERABOX_COOKIE:
         raise RuntimeError("TERABOX_COOKIE is not set.")
+    # TERABOX_COOKIE may be just "ndus=..." (45 chars total is a real,
+    # complete ndus — do not assume it is truncated) or a full cookie
+    # string "ndus=...; ndut=...; ...". Send it exactly as given.
+    cookie_names = ",".join(
+        p.split("=", 1)[0].strip() for p in TERABOX_COOKIE.split(";") if "=" in p
+    )
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                       "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -222,9 +228,13 @@ def _resolve_terabox_custom(link: str) -> dict:
             js_token = m_js.group(1) if m_js else ""
             m_log = re.search(r"dp-logid=(\d+)", text)
             logid = m_log.group(1) if m_log else ""
-            m_bd = re.search(r'bdstoken":"([0-9a-fA-F]+)"', text)
-            bdstoken = m_bd.group(1) if m_bd else ""
-            if js_token and logid and bdstoken:
+            # bdstoken appears in several forms; accept any non-empty
+            # value, not only hex. An empty bdstoken ("bdstoken":"")
+            # means Terabox did not treat this session as logged in.
+            m_bd = re.search(r'bdstoken["\']?\s*[:=]\s*["\']([^"\',;]+)', text) \
+                or re.search(r"bdstoken%22%3A%22([^%\"']+)", text)
+            bdstoken = (m_bd.group(1) if m_bd else "").strip()
+            if js_token and logid:
                 break
             last_err = RuntimeError(
                 "Terabox share page did not contain all login tokens."
@@ -236,32 +246,96 @@ def _resolve_terabox_custom(link: str) -> dict:
         if not surl:
             raise RuntimeError("Terabox: could not find a share ID (surl) in the link.")
         log.info(
-            "Terabox resolve: host=%s cookie_len=%d js=%s logid=%s bdstoken=%s",
-            host, len(TERABOX_COOKIE), bool(js_token), bool(logid), bool(bdstoken),
+            "Terabox resolve: host=%s cookies=%s cookie_len=%d js=%s logid=%s bdstoken=%s",
+            host, cookie_names, len(TERABOX_COOKIE), bool(js_token), bool(logid), bool(bdstoken),
         )
-        if not js_token or not logid or not bdstoken:
+        if not js_token or not logid:
             raise RuntimeError(
                 "Terabox: could not read login tokens from the share page "
                 f"(js={bool(js_token)}, logid={bool(logid)}, "
-                f"bdstoken={bool(bdstoken)}, cookie_len={len(TERABOX_COOKIE)}). "
-                "Terabox is not accepting your login cookie — re-copy the "
-                "full ndus value while logged in on terabox.app, update "
-                "TERABOX_COOKIE in Render, wait for Live, and try again."
+                f"bdstoken={bool(bdstoken)}, cookies={cookie_names}, "
+                f"cookie_len={len(TERABOX_COOKIE)}). "
+                "Terabox is not accepting your login cookie — make sure "
+                "you are logged in on terabox.app and TERABOX_COOKIE "
+                "holds your ndus cookie (it may also help to include "
+                "ndut, e.g. 'ndus=...; ndut=...')."
             )
-        params = {
-            "app_id": "250528", "web": "1", "channel": "dubox",
-            "clienttype": "0", "jsToken": js_token, "dp-logid": logid,
-            "page": "1", "num": "20", "by": "name", "order": "asc",
-            "site_referer": final_url, "shorturl": surl, "root": "1,",
-        }
-        r2 = sess.get(f"https://{host}/share/list", headers=headers,
-                      params=params, timeout=30)
-        data = r2.json()
+        # NOTE (2026-11-04): do NOT send dp-logid to Terabox's API.
+        # It looks mandatory in the page bundle, but sending it makes
+        # Terabox refuse every call with 460020 "need verify", cookie
+        # or no cookie. bdstoken is also optional for a public share —
+        # listing works without a login, only the download needs one.
+        # Try /api/shorturlinfo first, then /share/list, on the host
+        # the page came from and on the other Terabox hosts — a cookie
+        # is only valid on the domain that issued it.
+        hosts = []
+        for h in [host, "www.terabox.app", "www.1024tera.com", "terabox.com"]:
+            if h and h not in hosts:
+                hosts.append(h)
+        data = {}
+        last_api_err = ""
+        for api_host in hosts:
+            attempts = [
+                ("api/shorturlinfo", {
+                    "app_id": "250528", "web": "1", "channel": "dubox",
+                    "clienttype": "0", "jsToken": js_token,
+                    "shorturl": surl, "root": "1",
+                }),
+                ("share/list", {
+                    "app_id": "250528", "web": "1", "channel": "dubox",
+                    "clienttype": "0", "jsToken": js_token,
+                    "page": "1", "num": "20", "by": "name", "order": "asc",
+                    "site_referer": final_url, "shorturl": surl, "root": "1,",
+                }),
+            ]
+            for path, params in attempts:
+                try:
+                    r2 = sess.get(f"https://{api_host}/{path}", headers=headers,
+                                  params=params, timeout=30)
+                    data = r2.json()
+                except Exception as e:  # noqa: BLE001
+                    last_api_err = str(e)
+                    data = {}
+                    continue
+                if data and data.get("list") and not data.get("errno"):
+                    break
+                last_api_err = str(data.get("errmsg") or data.get("errno") or data)
+                data = data if data.get("list") else {}
+            if data and data.get("list"):
+                break
         if not data or "list" not in data or not data["list"] or data.get("errno"):
+            # Last resort: the share page itself sometimes embeds the
+            # file name / dlink directly.
+            m_name = re.search(r'server_filename["\']?\s*[:=]\s*["\']([^"\']+)', text)
+            m_link = re.search(r'dlink["\']?\s*[:=]\s*["\']([^"\']+)', text)
+            m_size = re.search(r'"size"\s*:\s*(\d+)', text)
+            if m_name and m_link:
+                return {
+                    "name": m_name.group(1),
+                    "size": human_size(int(m_size.group(1))) if m_size else None,
+                    "size_bytes": int(m_size.group(1)) if m_size else None,
+                    "url": m_link.group(1).replace("\\/", "/"),
+                    "thumb": None,
+                }
             raise RuntimeError(
-                f"Terabox share/list failed: {data.get('errmsg', data)}"
+                "Terabox: could not read the file list for this share "
+                f"(js={bool(js_token)}, logid={bool(logid)}, "
+                f"bdstoken={bool(bdstoken)}, cookies={cookie_names}, "
+                f"cookie_len={len(TERABOX_COOKIE)}). "
+                f"Terabox API said: {last_api_err or 'no response'}. "
+                "If it says 'need verify' / 'user not login', the "
+                "login cookie is not accepted for this share — try a "
+                "fresh ndus + ndut_fmt from a logged-in terabox.app tab."
             )
         info = data["list"][0]
+        if not info.get("dlink"):
+            raise RuntimeError(
+                "Terabox: the file list came back but with no download "
+                "link (dlink is empty). Terabox gives an empty dlink to "
+                "a guest login — the ndus + ndut_fmt cookie in Render "
+                "is not being accepted as a real logged-in session. "
+                "Re-copy both cookies fresh from a logged-in terabox.app tab."
+            )
         size_bytes = int(info.get("size", 0) or 0)
         return {
             "name": info.get("server_filename") or "file",
