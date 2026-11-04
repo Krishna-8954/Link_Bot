@@ -36,7 +36,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -145,34 +145,159 @@ def _parse_size(value) -> tuple[str | None, int | None]:
 
 # ------------------------------------------------------------ resolvers
 
+def _find_between(s: str, start: str, end: str) -> str:
+    i = s.find(start)
+    if i < 0:
+        return ""
+    i += len(start)
+    j = s.find(end, i)
+    return s[i:j] if j >= 0 else ""
+
+
+def _resolve_terabox_custom(link: str) -> dict:
+    """Custom Terabox resolver — no terabox-downloader, no forced Host header.
+
+    Why this exists (2026-11-04): terabox-downloader 1.8 failed every time
+    with "Failed to extract required tokens". Its page fetch forces
+    `Host: www.terabox.app` even when the link redirects to a different
+    Terabox host (e.g. www.1024tera.com), and it gives no clue which token
+    was missing. This version follows redirects naturally, calls share/list
+    on the host the page actually came from, and logs which tokens were
+    found (booleans only — never the cookie itself).
+    """
+    if not TERABOX_COOKIE:
+        raise RuntimeError("TERABOX_COOKIE is not set.")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/135.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.terabox.app/",
+        "Cookie": TERABOX_COOKIE,
+    }
+    with requests.Session() as sess:
+        # Short links like teraboxshare.com/s/<id> carry the surl in the
+        # path itself, so go straight to the canonical share page instead
+        # of following the short link's redirect chain (which can hang or
+        # land on a different Terabox host each time).
+        m_path = re.search(r"/s/([A-Za-z0-9_-]+)", urlparse(link).path)
+        # Short links are /s/1<surl> — the leading "1" is not part of the
+        # surl (verified: /s/1an6yIVbS9GGi8ABfBkaudQ redirects to
+        # ?surl=an6yIVbS9GGi8ABfBkaudQ). Try the stripped surl first,
+        # then the full path segment, then the original link itself.
+        candidates = []
+        if m_path:
+            seg = m_path.group(1)
+            candidates.append(
+                f"https://www.terabox.app/sharing/link?surl={seg[1:]}"
+            )
+            candidates.append(
+                f"https://www.terabox.app/sharing/link?surl={seg}"
+            )
+        candidates.append(link)
+        r = None
+        text = ""
+        js_token = logid = bdstoken = ""
+        surl = None
+        last_err = None
+        for cand in candidates:
+            try:
+                resp = sess.get(cand, headers=headers, timeout=20)
+                if not resp.ok:
+                    last_err = RuntimeError(
+                        f"Terabox share page returned HTTP {resp.status_code}."
+                    )
+                    continue
+            except Exception as e:  # noqa: BLE001 - try the next candidate
+                last_err = e
+                continue
+            r, text = resp, resp.text
+            final_url_tmp = resp.url
+            qs_tmp = parse_qs(urlparse(final_url_tmp).query)
+            surl = qs_tmp.get("surl", [None])[0] \
+                or (m_path.group(1)[1:] if m_path else None)
+            m_js = re.search(r"fn%28%22([0-9A-Fa-f]+)%22%29", text) \
+                or re.search(r'jsToken":"([0-9A-Za-z]+)"', text)
+            js_token = m_js.group(1) if m_js else ""
+            m_log = re.search(r"dp-logid=(\d+)", text)
+            logid = m_log.group(1) if m_log else ""
+            m_bd = re.search(r'bdstoken":"([0-9a-fA-F]+)"', text)
+            bdstoken = m_bd.group(1) if m_bd else ""
+            if js_token and logid and bdstoken:
+                break
+            last_err = RuntimeError(
+                "Terabox share page did not contain all login tokens."
+            )
+        if r is None or not r.ok:
+            raise last_err or RuntimeError("Terabox share page could not be fetched.")
+        final_url = r.url
+        host = urlparse(final_url).netloc
+        if not surl:
+            raise RuntimeError("Terabox: could not find a share ID (surl) in the link.")
+        log.info(
+            "Terabox resolve: host=%s cookie_len=%d js=%s logid=%s bdstoken=%s",
+            host, len(TERABOX_COOKIE), bool(js_token), bool(logid), bool(bdstoken),
+        )
+        if not js_token or not logid or not bdstoken:
+            raise RuntimeError(
+                "Terabox: could not read login tokens from the share page "
+                f"(js={bool(js_token)}, logid={bool(logid)}, "
+                f"bdstoken={bool(bdstoken)}, cookie_len={len(TERABOX_COOKIE)}). "
+                "Terabox is not accepting your login cookie — re-copy the "
+                "full ndus value while logged in on terabox.app, update "
+                "TERABOX_COOKIE in Render, wait for Live, and try again."
+            )
+        params = {
+            "app_id": "250528", "web": "1", "channel": "dubox",
+            "clienttype": "0", "jsToken": js_token, "dp-logid": logid,
+            "page": "1", "num": "20", "by": "name", "order": "asc",
+            "site_referer": final_url, "shorturl": surl, "root": "1,",
+        }
+        r2 = sess.get(f"https://{host}/share/list", headers=headers,
+                      params=params, timeout=30)
+        data = r2.json()
+        if not data or "list" not in data or not data["list"] or data.get("errno"):
+            raise RuntimeError(
+                f"Terabox share/list failed: {data.get('errmsg', data)}"
+            )
+        info = data["list"][0]
+        size_bytes = int(info.get("size", 0) or 0)
+        return {
+            "name": info.get("server_filename") or "file",
+            "size": human_size(size_bytes) if size_bytes else None,
+            "size_bytes": size_bytes or None,
+            "url": info.get("dlink"),
+            "thumb": (info.get("thumbs") or {}).get("url3"),
+        }
+
+
 def resolve_terabox(link: str) -> dict:
     """Turn a Terabox share link into file metadata + a direct download URL."""
     try:
-        from TeraboxDL import TeraboxDL
-    except ImportError as e:
-        raise RuntimeError(
-            "terabox-downloader package is not installed. "
-            "Run: pip install terabox-downloader"
-        ) from e
-
-    tb = TeraboxDL(TERABOX_COOKIE)
-    info = tb.get_file_info(link)
-    if isinstance(info, dict) and "error" in info:
-        raise RuntimeError(f"Terabox: {info['error']}")
-    # terabox-downloader 1.8 returns size_bytes directly; fall back to
-    # parsing the human-readable file_size string if it ever disappears.
-    size_bytes = info.get("size_bytes")
-    if size_bytes is not None:
-        size_txt = info.get("file_size") or human_size(int(size_bytes))
-    else:
-        size_txt, size_bytes = _parse_size(info.get("file_size"))
-    return {
-        "name": info.get("file_name") or "file",
-        "size": size_txt,
-        "size_bytes": size_bytes,
-        "url": info.get("download_link"),
-        "thumb": info.get("thumbnail"),
-    }
+        return _resolve_terabox_custom(link)
+    except Exception as custom_err:  # noqa: BLE001 - fall back to the library
+        log.warning("Custom Terabox resolver failed: %s — trying terabox-downloader", custom_err)
+        try:
+            from TeraboxDL import TeraboxDL
+        except ImportError:
+            raise custom_err from None
+        tb = TeraboxDL(TERABOX_COOKIE)
+        info = tb.get_file_info(link)
+        if isinstance(info, dict) and "error" in info:
+            raise custom_err from None
+        size_bytes = info.get("size_bytes")
+        if size_bytes is not None:
+            size_txt = info.get("file_size") or human_size(int(size_bytes))
+        else:
+            size_txt, size_bytes = _parse_size(info.get("file_size"))
+        return {
+            "name": info.get("file_name") or "file",
+            "size": size_txt,
+            "size_bytes": size_bytes,
+            "url": info.get("download_link"),
+            "thumb": info.get("thumbnail"),
+        }
 
 
 # ------------------------------------------------------------ Diskwala
